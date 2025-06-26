@@ -2,7 +2,9 @@
 // See the LICENCE file in the repository root for full licence text.
 
 using System;
+using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using osu.Desktop.Deploy.Uploaders;
 
 namespace osu.Desktop.Deploy.Builders
@@ -64,8 +66,52 @@ namespace osu.Desktop.Deploy.Builders
             RunDotnetPublish(outputDir: publishTarget);
             AttachSatoriGC(outputDir: publishTarget);
 
+            signLibsManually();
+
             // without touching the app bundle itself, changes to file associations / icons / etc. will be cached at a macOS level and not updated.
             Program.RunCommand("touch", $"\"{stagingTarget}\" {Program.StagingPath}", false);
+        }
+
+        private void signLibsManually()
+        {
+            // Velopack's signing doesn't cover all the files that apple wants signed, so let's pre-sign the stuff that it misses.
+            foreach (string file in Directory.EnumerateFiles(stagingTarget, "*", SearchOption.AllDirectories))
+            {
+                if (!file.EndsWith(".dylib", StringComparison.OrdinalIgnoreCase) && !isExecutable(file))
+                    continue;
+
+                if (isUnsigned(file))
+                {
+                    Console.WriteLine($"Signing: {file}");
+                    string identity = Program.AppleCodeSignCertName!;
+                    Program.RunCommand("codesign", $"--force --options runtime --timestamp --sign \"{identity}\" \"{file}\"");
+                }
+            }
+        }
+
+        private static bool isExecutable(string path)
+        {
+            return access(path, 1) == 0;
+        }
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int access(string pathname, int mode);
+
+        private static bool isUnsigned(string path)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "codesign",
+                Arguments = $"-d \"{path}\"",
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+            using (var proc = Process.Start(startInfo))
+            {
+                string error = proc.StandardError.ReadToEnd();
+                proc.WaitForExit();
+                return error.Contains("code object is not signed");
+            }
         }
     }
 }
